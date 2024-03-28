@@ -18,7 +18,7 @@ from PyQt5.QtWidgets import QGraphicsLineItem
 #qpen
 from PyQt5.QtGui import QPen
 
-from PyQt5.QtWidgets import QLabel, QVBoxLayout, QPushButton, QSlider, QHBoxLayout
+from PyQt5.QtWidgets import QLabel, QVBoxLayout, QPushButton, QSlider, QHBoxLayout,QMessageBox
 from PyQt5.QtCore import pyqtSlot, Qt
 from PyQt5.QtGui import QPixmap, QIcon
 import cv2
@@ -26,6 +26,11 @@ import time
 from calibration import CalibrationDialog
 import math
 from ROI import ROIDialog
+
+from PyQt5.QtCore import QObject, pyqtSignal
+import pandas as pd 
+
+
 
 def process_frame(cv_img, display_width, display_height):
     rgb_image = cv2.cvtColor(cv_img, cv2.COLOR_BGR2RGB)
@@ -99,7 +104,7 @@ def draw_flow(img, flow, winsize=30, real_time_fps=30, show_fps=False, frame_cou
     current_velocity = np.mean(velocities) if velocities.size > 0 else 0
 
     # Calculate the Exponential Moving Average of the velocity to smooth fluctuations over time.
-    avg_velocity = (current_velocity * alpha) + (prev_avg_velocity * (1 - alpha))
+    avg_velocity =current_velocity
 
     # Create an array of line segments to represent the flow. Each line starts at (x, y) and
     # ends at (x + fx, y + fy), indicating the direction and magnitude of flow.
@@ -214,6 +219,7 @@ class VideoPlayer(QWidget):
         self.display_height = None
         self.init_ui()
         self.thread = None
+        self.parent = parent
         if video_path:
             self.load_video(video_path)
 
@@ -290,6 +296,9 @@ class VideoPlayer(QWidget):
             p = process_frame(cv_img, self.display_width, self.display_height)
             self.update_image(p)
 
+        #connect the thread to the timeseries widget
+        self.parent.timeseries_widget.connect_slider_signal()
+
     @pyqtSlot(QImage)
     def update_image(self, qt_img):
         pixmap = QPixmap.fromImage(qt_img)
@@ -304,6 +313,9 @@ class VideoPlayer(QWidget):
     def slider_changed(self, value):
         if self.thread:
             self.thread.seek(value)
+            #update the timeseries widget
+            self.parent.timeseries_widget.plot(self.parent.timeseries_widget.add_vertical_line(value))
+
     def get_current_frame(self):
         if self.thread and self.thread.cap.isOpened():
             ret, frame = self.thread.cap.read()
@@ -446,6 +458,16 @@ class OptionsMenu(QWidget):
         self.tree.header().setSectionResizeMode(0, QHeaderView.ResizeToContents)
         self.tree.header().setSectionResizeMode(1, QHeaderView.Stretch)
 
+        self.reference_set_widget.input.textChanged.connect(lambda: self.update_conv_factor())
+        self.reference_cm_set_widget.textChanged.connect(lambda: self.update_conv_factor())
+
+        self.video_processor = VideoProcessor()
+        self.video_processor.progress_updated.connect(self.update_progress_bar)
+
+    def update_progress_bar(self, value):
+        self.loading_bar.setValue(value)
+
+
     def open_roi_dialog(self):
         current_frame = self.parent.video_player.get_current_frame()
         if current_frame is not None:
@@ -472,21 +494,45 @@ class OptionsMenu(QWidget):
         # Update the ButtonLineEdit with the length
         self.reference_set_widget.input.setText(str(length))
 
+
+
     def add_optical_flow_properties(self, parent_item):
-        user_friendly_names = {
-            "Pyramid Scale": "0.5",
-            "Levels": "3",
-            "Window Size": "15",
-            "Iterations": "3",
-            "Poly N": "5",
-            "Poly Sigma": "1.2",
-            "Flags": "0"
-        }
-        for name, default_value in user_friendly_names.items():
-            prop_item = QTreeWidgetItem(parent_item)
-            prop_item.setText(0, name)
-            prop_edit = QLineEdit(default_value)
-            self.tree.setItemWidget(prop_item, 1, prop_edit)
+        # Pyramid Scale
+        pyramid_scale_item = QTreeWidgetItem(parent_item)
+        pyramid_scale_item.setText(0, "Pyramid Scale")
+        self.pyramid_scale_edit = QLineEdit("0.5")  # Set the default value
+        self.tree.setItemWidget(pyramid_scale_item, 1, self.pyramid_scale_edit)
+
+        # Levels
+        levels_item = QTreeWidgetItem(parent_item)
+        levels_item.setText(0, "Levels")
+        self.levels_edit = QLineEdit("3")  # Set the default value
+        self.tree.setItemWidget(levels_item, 1, self.levels_edit)
+
+        # Window Size
+        window_size_item = QTreeWidgetItem(parent_item)
+        window_size_item.setText(0, "Window Size")
+        self.window_size_edit = QLineEdit("100")  # Set the default value
+        self.tree.setItemWidget(window_size_item, 1, self.window_size_edit)
+
+        # Iterations
+        iterations_item = QTreeWidgetItem(parent_item)
+        iterations_item.setText(0, "Iterations")
+        self.iterations_edit = QLineEdit("5")  # Set the default value
+        self.tree.setItemWidget(iterations_item, 1, self.iterations_edit)
+
+        # Poly N
+        poly_n_item = QTreeWidgetItem(parent_item)
+        poly_n_item.setText(0, "Poly N")
+        self.poly_n_edit = QLineEdit("5")  # Set the default value
+        self.tree.setItemWidget(poly_n_item, 1, self.poly_n_edit)
+
+        # Poly Sigma
+        poly_sigma_item = QTreeWidgetItem(parent_item)
+        poly_sigma_item.setText(0, "Poly Sigma")
+        self.poly_sigma_edit = QLineEdit("1.2")  # Set the default value
+        self.tree.setItemWidget(poly_sigma_item, 1, self.poly_sigma_edit)
+
 
     def open_video_file_dialog(self):
         # Open file dialog for video files
@@ -502,82 +548,280 @@ class OptionsMenu(QWidget):
     def process_video(self):
         #unhide the progress bar
         self.loading_bar.show()
-        path=self.video_path_edit.input.text()
-        #convert the fps to float
-        fps=float(self.fps_edit.input.text())
-        #get the coordinates of the roi, convert string to dict
-        roi_dict=eval(self.roi_set_widget.input.text())
-        #get the reference conversion factor
-        conv_factor=float(self.calibration_set_widget.text())
+        #desable the process video button
+        self.process_video_button.setEnabled(False)
 
+        path=self.video_path_edit.input.text().strip()
+        #convert the fps to float
+        fps=self.fps_edit.input.text().strip() if self.fps_edit.input.text().strip() else 30
+        fps=float(fps)
+        #get the coordinates of the roi, convert string to dict
+        #check if not empty first
+        roi_dict=self.roi_set_widget.input.text().strip() if self.roi_set_widget.input.text().strip() else None
+        roi_dict = eval(roi_dict) if roi_dict else None
+        #get the reference conversion factor
+        conv_factor=self.calibration_set_widget.text().strip() if self.calibration_set_widget.text().strip() else 1.0
+        conv_factor=float(conv_factor)
+
+        #get the optical flow properties
+        pyramid_scale=self.pyramid_scale_edit.text().strip() if self.pyramid_scale_edit.text().strip() else 0.5
+        pyramid_scale=float(pyramid_scale)
+
+        levels=self.levels_edit.text().strip() if self.levels_edit.text().strip() else 3
+        levels=int(levels)
+
+        window_size=self.window_size_edit.text().strip() if self.window_size_edit.text().strip() else 15
+        window_size=int(window_size)
+
+        iterations=self.iterations_edit.text().strip() if self.iterations_edit.text().strip() else 5
+        iterations=int(iterations)
+
+        poly_n=self.poly_n_edit.text().strip() if self.poly_n_edit.text().strip() else 5
+        poly_n=int(poly_n)
+
+        poly_sigma=self.poly_sigma_edit.text().strip() if self.poly_sigma_edit.text().strip() else 1.2
+        poly_sigma=float(poly_sigma)
+
+        
         #pull the screen size from the parent
         display_width=self.parent.video_player.display_width
         display_height=self.parent.video_player.display_height
 
-        OF_process_video(path, fps, roi_dict,conv_factor)
+        self.video_processor.OF_process_video(path, fps, roi_dict,conv_factor,(display_width,display_height), pyramid_scale, levels, window_size, iterations, poly_n, poly_sigma)
 
-def OF_process_video(video_path, real_time_fps, roi_dict, conv_factor):
-    
-    
-    # Open video file
-    cap = cv2.VideoCapture(video_path)
-    if not cap.isOpened():
-        print("Error: Unable to read video file.")
-        return
+        #hide the progress bar
+        self.loading_bar.hide()
+        #enable the process video button
+        self.process_video_button.setEnabled(True)
 
-    
-    ret, prev = cap.read()
-    frame_height, frame_width = prev.shape[:2]
-    total_frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        self.parent.timeseries_widget.plot(self.video_processor.frame_data_pd)
 
-    # Calculate the ROI based on scale factor
-    w_roi, h_roi = roi_dict['w_roi'], roi_dict['h_roi']
-    x_roi, y_roi = roi_dict['x_roi'], roi_dict['y_roi']
-    use_roi = True 
+    def confirm_continue(self,title,msg):
+        retval = QMessageBox.question(self,title,
+                                      msg,
+                                      QMessageBox.Yes | QMessageBox.Cancel,
+                                      QMessageBox.Cancel)
 
-    # Video writer setup
-    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-    out = cv2.VideoWriter('output_video.mp4', fourcc, 10, (frame_width, frame_height))
+        return retval != QMessageBox.Cancel
 
-    prev_gray = cv2.cvtColor(prev, cv2.COLOR_BGR2GRAY)
-    frame_count, prev_avg_velocity, start_time = 0, 0, time.time()
+    def update_conv_factor(self):
+        #check if any of the reference length or reference length in cm is empty
+        if self.reference_set_widget.input.text() == "" or self.reference_cm_set_widget.text() == "":
+            return
+        #get the reference length in pxl
+        reference_length = float(self.reference_set_widget.input.text())
+        #get the reference length in cm
+        reference_length_cm = float(self.reference_cm_set_widget.text())
 
-    # Main video processing loop
-    while True:
-        ret, frame = cap.read()
-        if not ret:
-            break
+        #calculate the conversion factor
+        conv_factor = reference_length_cm / reference_length
+        #set the conversion factor to the line edit
+        self.calibration_set_widget.setText(str(conv_factor))
 
-        frame_count += 1
-        roi_frame = frame[y_roi:y_roi + h_roi, x_roi:x_roi + w_roi] if use_roi else frame
-        roi_frame_orig = cv2.cvtColor(roi_frame, cv2.COLOR_BGR2GRAY)
+class VideoProcessor(QObject):
+    progress_updated = pyqtSignal(int)
 
-        # Apply contrast enhancement
-        frame_YUV = cv2.cvtColor(roi_frame, cv2.COLOR_BGR2YUV)
-        frame_YUV[:, :, 0] = cv2.equalizeHist(frame_YUV[:, :, 0])
-        roi_frame = cv2.cvtColor(frame_YUV, cv2.COLOR_YUV2BGR)
-        gray = cv2.cvtColor(roi_frame, cv2.COLOR_BGR2GRAY)
+    def __init__(self):
 
-        # Optical Flow Processing
-        if frame_count == 1: prev_gray = gray
-        flow = cv2.calcOpticalFlowFarneback(prev_gray, gray, None, pyr_scale=0.5, levels=3, winsize=100, iterations=5, poly_n=5, poly_sigma=1.2, flags=0)
-        prev_gray = gray.copy()
+        super().__init__()
 
-        vis, prev_avg_velocity = draw_flow(roi_frame_orig, flow, winsize=100, real_time_fps=real_time_fps, show_fps=True, frame_count=frame_count, start_time=start_time, prev_avg_velocity=prev_avg_velocity, conv_factor=conv_factor, color_map_on=True)
+        self.frame_data = []
         
-        # Insert the processed ROI back into the frame and convert to BGR
-        gray_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        bgr_frame = cv2.cvtColor(gray_frame, cv2.COLOR_GRAY2BGR)
-        bgr_frame[y_roi:y_roi + h_roi, x_roi:x_roi + w_roi] = vis
+        #frame data pd dataframe, empty
+        self.frame_data_pd = None
 
-        cv2.imshow('Processed Video', bgr_frame)
-        out.write(bgr_frame)
+    def update_progress(self, value):
+        self.progress_updated.emit(value)
 
-        if cv2.waitKey(1) & 0xFF == ord('q'):
-            break
+    def OF_process_video(self,video_path, fps, roi_dict, conv_factor,screen_size, pyramid_scale, levels, window_size, iterations, poly_n, poly_sigma):
+        
+        self.frame_data = []  # Reset the frame data
 
-    # Release resources
-    cap.release()
-    out.release()
-    cv2.destroyAllWindows()
+        # Open video file
+        cap = cv2.VideoCapture(video_path)
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        if not cap.isOpened():
+            print("Error: Unable to read video file.")
+            return
 
+        
+        ret, prev = cap.read()
+        frame_height, frame_width = prev.shape[:2]
+
+        # Check if roi_dict is provided
+        if roi_dict:
+            # Calculate the ROI based on provided roi_dict
+            w_roi, h_roi = roi_dict['w_roi'], roi_dict['h_roi']
+            x_roi, y_roi = roi_dict['x_roi'], roi_dict['y_roi']
+        else:
+            # Set ROI to cover the full frame
+            x_roi, y_roi = 0, 0  # Starting from the top-left corner
+            w_roi, h_roi = frame_width, frame_height  # Use the entire dimensions of the frame
+
+
+        # Video writer setup
+        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+        out = cv2.VideoWriter('output_video.mp4', fourcc, fps, (frame_width, frame_height))
+
+        prev_gray = cv2.cvtColor(prev, cv2.COLOR_BGR2GRAY)
+        frame_count, prev_avg_velocity, start_time = 0, 0, time.time()
+
+        # Main video processing loop
+        while True:
+            ret, frame = cap.read()
+            if not ret:
+                break
+
+            frame_count += 1
+            roi_frame = frame[y_roi:y_roi + h_roi, x_roi:x_roi + w_roi]
+            roi_frame_orig = cv2.cvtColor(roi_frame, cv2.COLOR_BGR2GRAY)
+
+            # Apply contrast enhancement
+            frame_YUV = cv2.cvtColor(roi_frame, cv2.COLOR_BGR2YUV)
+            frame_YUV[:, :, 0] = cv2.equalizeHist(frame_YUV[:, :, 0])
+            roi_frame = cv2.cvtColor(frame_YUV, cv2.COLOR_YUV2BGR)
+            gray = cv2.cvtColor(roi_frame, cv2.COLOR_BGR2GRAY)
+
+            # Optical Flow Processing
+            if frame_count == 1: prev_gray = gray
+            flow = cv2.calcOpticalFlowFarneback(prev_gray, gray, None, pyr_scale=pyramid_scale, levels=levels, winsize=window_size, iterations=iterations, poly_n=5, poly_sigma=poly_sigma, flags=0)
+            prev_gray = gray.copy()
+
+
+            vis, prev_avg_velocity = draw_flow(roi_frame_orig, flow, winsize=window_size, real_time_fps=fps, show_fps=True, frame_count=frame_count, start_time=start_time, prev_avg_velocity=prev_avg_velocity, conv_factor=conv_factor, color_map_on=True)
+            
+            # Insert the processed ROI back into the frame and convert to BGR
+            gray_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            bgr_frame = cv2.cvtColor(gray_frame, cv2.COLOR_GRAY2BGR)
+            bgr_frame[y_roi:y_roi + h_roi, x_roi:x_roi + w_roi] = vis
+
+            # Determine the scale factor for display
+            screen_height, screen_width = screen_size
+            scale_width = screen_width / frame_width
+            scale_height = screen_height / frame_height
+            scale = min(scale_width, scale_height)
+
+            # Resize the frame for display purposes only
+            display_frame = cv2.resize(bgr_frame, None, fx=scale, fy=scale, interpolation=cv2.INTER_LINEAR)
+
+            cv2.imshow('Processed Video', display_frame)
+            out.write(bgr_frame)
+
+
+            timestamp = frame_count / fps  # Calculate timestamp for each frame
+            self.frame_data.append((frame_count,timestamp, prev_avg_velocity))  # Store timestamp and velocity
+
+            progress = int((frame_count / total_frames) * 100)
+            self.update_progress(progress)
+
+            if cv2.waitKey(1) & 0xFF == ord('q'):
+                break
+
+        # Release resources
+        cap.release()
+        out.release()
+        cv2.destroyAllWindows()
+
+        # Convert the frame data to a Pandas DataFrame
+        self.frame_data_pd = pd.DataFrame(self.frame_data, columns=['Frame', 'Timestamp', 'Velocity'])
+        print(self.frame_data_pd.head())
+
+        self.update_progress(100)
+
+import numpy as np  
+import numpy as np
+import pyqtgraph as pg
+from PyQt5.QtWidgets import QWidget, QVBoxLayout
+from PyQt5.QtWidgets import QWidget, QVBoxLayout, QDialog, QApplication
+import pyqtgraph as pg
+import sys
+
+class FullScreenPlot(QDialog):
+    def __init__(self, data, parent=None):
+        super().__init__(parent, Qt.Window)
+        self.initUI(data)
+
+    def initUI(self, data):
+        layout = QVBoxLayout()
+        plot_graph = pg.PlotWidget()
+        layout.addWidget(plot_graph)
+        self.setLayout(layout)
+        plot_graph.setBackground("w")
+
+        if isinstance(data, pd.DataFrame):
+            # Plotting data
+            timestamps = data['Timestamp']
+            velocities = data['Velocity']
+            plot_graph.plot(timestamps, velocities)
+
+
+        # Full screen settings
+        self.showFullScreen()
+
+    def closeEvent(self, event):
+        self.parent().show()  # Show the parent window on closing full screen
+        event.accept()
+    #double click event
+    def mouseDoubleClickEvent(self, event):
+        self.close()
+    
+
+class TimeSeriesPlot(QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.initUI()
+        self.data = None
+        self.vertical_line = None  # Initialize the vertical line reference
+
+        self.parent = parent
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)  # Set the size policy
+
+
+    def initUI(self):
+        self.layout = QVBoxLayout()
+        self.layout.setContentsMargins(0, 0, 0, 0)  # Set the layout margins to zero
+        self.plot_graph = pg.PlotWidget()
+        self.layout.addWidget(self.plot_graph)
+        self.setLayout(self.layout)
+        self.plot_graph.setBackground("w")
+
+    def connect_slider_signal(self):
+        
+        # Ensure that the thread object exists
+        if self.parent.video_player.thread:
+            self.parent.video_player.thread.update_slider_signal.connect(self.add_vertical_line)
+        else:
+            print("Thread not initialized")
+
+    def plot(self, data):
+        if isinstance(data, pd.DataFrame):
+            self.data = data
+            timestamps = data['Timestamp']
+            velocities = data['Velocity']
+
+            self.plot_graph.clear()  # Clear previous plot
+            self.plot_graph.setYRange(0, max(velocities))
+            self.plot_graph.setXRange(0, max(timestamps))
+            self.plot_graph.plot(timestamps, velocities)
+
+    def open_full_screen(self):
+        self.full_screen_window = FullScreenPlot(self.data, self)
+        #self.hide()  # Hide the main window
+    
+    #double click event
+    def mouseDoubleClickEvent(self, event):
+        self.open_full_screen()
+
+    def add_vertical_line(self, value):
+        # Check if self.data is a Pandas DataFrame
+        print("value",value,type(self.data))
+        if isinstance(self.data, pd.DataFrame):
+            timestamp = (value / 100) * max(self.data['Timestamp'])
+
+            if self.vertical_line is not None:
+                # Update the position of the existing line
+                self.vertical_line.setValue(timestamp)
+            else:
+                # Create a new vertical line if it doesn't exist
+                self.vertical_line = pg.InfiniteLine(pos=timestamp, angle=90, pen=pg.mkPen('r', width=2))
+                self.plot_graph.addItem(self.vertical_line)

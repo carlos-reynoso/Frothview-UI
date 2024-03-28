@@ -5,10 +5,10 @@ from PyQt5.QtCore import QThread, pyqtSignal, pyqtSlot, Qt, QMutex
 from PyQt5.QtGui import QPixmap, QImage, QIcon
 from PyQt5.QtWidgets import QHBoxLayout
 from PyQt5.QtWidgets import QMainWindow
-from helper_functions import VideoPlayer, OptionsMenu,process_frame
+from helper_functions import VideoPlayer, OptionsMenu,process_frame, TimeSeriesPlot
 from PyQt5.QtWidgets import QMainWindow, QApplication, QDockWidget, QTextEdit
 from PyQt5.QtWidgets import QApplication, QMainWindow, QDesktopWidget
-
+import pyqtgraph as pg
 
 class MainApplication(QMainWindow):
     def __init__(self):
@@ -39,15 +39,20 @@ class MainApplication(QMainWindow):
 
         # Dock for Time Series Plot below the Video
         timeseries_dock = QDockWidget("Time Series Plot", self)
-        timeseries_dock_widget = QTextEdit()  # Placeholder widget
-        timeseries_dock.setWidget(timeseries_dock_widget)
+        self.timeseries_widget = TimeSeriesPlot(self)
+        timeseries_dock.setWidget(self.timeseries_widget)
         self.addDockWidget(Qt.BottomDockWidgetArea, timeseries_dock)
+        #set the size )
+        timeseries_dock.setMaximumHeight(200)
+
 
         # Dock for Plots on the Right
         plots_dock = QDockWidget("Plots", self)
         plots_dock_widget = QTextEdit()  # Placeholder widget
         plots_dock.setWidget(plots_dock_widget)
         self.addDockWidget(Qt.RightDockWidgetArea, plots_dock)
+
+
 
 if __name__ == '__main__':
     app = QApplication(sys.argv)
